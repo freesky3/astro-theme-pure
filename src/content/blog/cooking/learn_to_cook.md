@@ -4,7 +4,7 @@ publishDate: 2026-01-31 19:39:00
 description: '人是铁，饭是钢'
 tags:
   - 做饭
-heroImage: { src: './cook.jpg', color: '#9D8D80' }
+heroImage: { src: './food.jpg', color: '#9D8D80' }
 language: '中文'
 ---
 
