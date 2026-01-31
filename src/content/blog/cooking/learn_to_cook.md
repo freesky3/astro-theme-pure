@@ -1,10 +1,10 @@
 ---
-title: CS2030DE笔记-Programming Methodology II
+title: 留学做饭入坑记录
 publishDate: 2026-01-31 19:39:00
 description: '人是铁，饭是钢'
 tags:
   - 做饭
-heroImage: { src: './cook.jpg', color: '#9D8D80 }
+heroImage: { src: './cook.jpg', color: '#9D8D80' }
 language: '中文'
 ---
 
@@ -40,7 +40,7 @@ language: '中文'
 |    |                                                     |
 |    |                                                     |
 
-## 2. 海鲜
+## 4. 海鲜
 
 | 食材 | 保存方法 |
 |----|------|
