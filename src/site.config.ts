@@ -1,11 +1,15 @@
-import type { CardListData, Config, IntegrationUserConfig, ThemeUserConfig } from 'astro-pure/types'
+import type { CardListData, Config, IntegrationUserConfig, ThemeUserConfig } from 'astro-pure/types';
+
+
+
+
 
 export const theme: ThemeUserConfig = {
   // [Basic]
   /** Title for your website. Will be used in metadata and as browser tab title. */
-  title: 'Astro Theme Pure',
+  title: 'Zikai‘s Blog',
   /** Will be used in index page & copyright declaration */
-  author: 'Pure Lab',
+  author: 'Skywalker',
   /** Description metadata for your website. Can be used in page metadata. */
   description: 'Stay hungry, stay foolish',
   /** The default favicon for your site which should be a path to an image in the `public/` directory. */
@@ -14,10 +18,10 @@ export const theme: ThemeUserConfig = {
   socialCard: '/images/social-card.png',
   /** Specify the default language for this site. */
   locale: {
-    lang: 'en-US',
-    attrs: 'en_US',
+    lang: 'zh-CN', // en_US
+    attrs: 'zh-CN', // en_US
     // Date locale
-    dateLocale: 'en-US',
+    dateLocale: 'zh-CN', // en_US
     dateOptions: {
       day: 'numeric',
       month: 'short',
@@ -27,7 +31,7 @@ export const theme: ThemeUserConfig = {
   /** Set a logo image to show in the homepage. */
   logo: {
     src: '/src/assets/avatar.png',
-    alt: 'Avatar'
+    alt: 'Skywalker'
   },
 
   titleDelimiter: '•',
@@ -135,8 +139,8 @@ export const integ: IntegrationUserConfig = {
     // server: 'http://api.quotable.io/quotes/random?maxLength=60',
     // target: `(data) => data[0].content || 'Error'`
     // - DummyJSON
-    server: 'https://dummyjson.com/quotes/random',
-    target: `(data) => (data.quote.length > 80 ? \`\${data.quote.slice(0, 80)}...\` : data.quote || 'Error')`
+    server: 'https://v1.hitokoto.cn/?c=i', //'https://dummyjson.com/quotes/random',
+    target: "`(data) => (data.hitokoto || 'Error')` " //`(data) => (data.quote.length > 80 ? \`\${data.quote.slice(0, 80)}...\` : data.quote || 'Error')`
   },
   // [Typography]
   // https://unocss.dev/presets/typography
@@ -159,7 +163,7 @@ export const integ: IntegrationUserConfig = {
   },
   // Comment system
   waline: {
-    enable: true,
+    enable: false,
     // Server service link
     server: 'https://astro-theme-pure-waline.arthals.ink/',
     // Show meta info for comments

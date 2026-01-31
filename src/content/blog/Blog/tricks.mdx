@@ -1,0 +1,35 @@
+---
+title: 博客美化技巧
+publishDate: 2026-01-31 15:12:00
+description: 'Astro Pure博客美化技巧。'
+tags:
+  - Blog
+heroImage: { src: './OIP.webp', color: '#3A4C58' }
+language: '中文'
+---
+
+import { Aside } from 'astro-pure/user'
+
+记录在这个主题博客写作的一些技巧：
+
+# 1. Aside美化
+
+{/* 1. 笔记 (蓝色) */}
+<Aside type="note" title="补充说明">
+  这是一条普通的笔记。用于记录一些额外信息，比如背景知识。
+</Aside>
+
+{/* 2. 提示 (绿色) - 你现在的这个 */}
+<Aside type="tip" title="小技巧">
+  这是一个好用的技巧！比如“按住 Ctrl 可以多选”。
+</Aside>
+
+{/* 3. 警告 (黄色) */}
+<Aside type="caution" title="请注意">
+  由于 API 变动，这个功能在旧版本浏览器上可能无法使用。
+</Aside>
+
+{/* 4. 危险 (红色) */}
+<Aside type="danger" title="不要这样做">
+  执行此命令会永久删除你的数据库，且无法恢复！
+</Aside>
