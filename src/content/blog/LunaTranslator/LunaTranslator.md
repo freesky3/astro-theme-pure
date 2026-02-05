@@ -26,69 +26,38 @@ language: '中文'
 修改正面、背面、样式代码：
 
 
+{{< tabs "anki-template" >}}
 
-{{< tabs groupId="anki-template" >}}
-
-{{% tab name="正面模板" %}}
-```html
-<div class="centerdiv">
-    {{Image}} 
-</div>
-
-<div class="mobile example-div">
-    {{Sentence_With_Reading}}
-</div>
-
-{{Audio}}
-
-```
-
-{{% /tab %}}
-
-{{% tab name="背面模板" %}}
-
-```html
-{{FrontSide}}
-
-<hr id="answer">
-
-<div class="ai-analysis-container">
-    <div class="analysis-box">
-        <div class="analysis-title">📖 单词解析</div>
-        {{Word_Analysis}}
+  {{< tab "正面模板" >}}
+    ```html
+    <div class="centerdiv">
+      {{Image}}
     </div>
-
-    <div class="analysis-box">
-        <div class="analysis-title">💡 语法分析</div>
-        {{Grammar_Note}}
+    <div class="mobile example-div">
+      {{Sentence_With_Reading}}
     </div>
-</div>
+    {{Audio}}
+    ```
+  {{< /tab >}}
 
-```
+  {{< tab "背面模板" >}}
+    ```html
+    {{FrontSide}}
+    <hr id="answer">
+    <div class="ai-analysis-container">
+       <div class="class-analysis-box">
+          </div>
+    </div>
+    ```
+  {{< /tab >}}
 
-{{% /tab %}}
-
-{{% tab name="样式 (CSS)" %}}
-
-```css
-/* 这里放我们上一轮优化过的 CSS 代码 */
-.card {
-    font-family: "BIZ UDGothic", "Microsoft YaHei", sans-serif;
-    background-color: #ffffff;
-    color: #333;
-    font-size: 20px;
-}
-
-.night_mode .card {
-    background-color: #2f3542;
-    color: #e0e0e0;
-}
-
-/* ... 把剩下的 CSS 粘贴在这里 ... */
-
-```
-
-{{% /tab %}}
+  {{< tab "样式 (CSS)" >}}
+    ```css
+    /* 这里放 CSS 代码 */
+    .card {
+       font-family: arial;
+    }
+    ```
+  {{< /tab >}}
 
 {{< /tabs >}}
-
