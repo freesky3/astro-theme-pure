@@ -297,7 +297,7 @@ language: '中文'
    ANKI_URL = "http://localhost:8765"
    
    # OpenAI / 兼容 API 配置
-   API_KEY = "你的API "  # 替换为你的 API Key
+   API_KEY = "你的API Key"  # 替换为你的 API Key
    BASE_URL = "https://api.moonshot.cn/v1"         # 如果是用其他服务商，请修改此处
    MODEL_NAME = "kimi-k2-0905-preview"                          # 或 gpt-3.5-turbo, deepseek-chat 等
    
