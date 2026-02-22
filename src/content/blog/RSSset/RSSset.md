@@ -9,6 +9,8 @@ heroImage: { src: './RSS.png', color: '#7E787D' }
 language: '中文'
 ---
 
+每天只需api费用最多0.35元，平均一个月不到10块（可能只有5块左右？）
+
 这是一个非常极客且高效的方案！将纯代码脚本部署在 **Cloudflare Workers** 上，不仅完全免费、无需维护服务器，还能利用它的 Cron 定时触发器（Cron Triggers）实现完美的自动化。
 
 由于 Cloudflare Workers 原生不支持直接通过 SMTP 发送邮件，我们最优雅的免费方案是结合 **Resend**（一个对开发者极度友好的邮件 API 平台，免费额度每天 100 封，完全足够你一个人使用）。
@@ -117,11 +119,50 @@ interface ParsedFeedItem {
   publishedAt: Date | null;
 }
 
+const LLM_MAX_RETRIES = 10;
+const LLM_RETRYABLE_STATUS = new Set([429, 503]);
+const LLM_SUMMARY_PARSE_RETRIES = 3;
+const DETAIL_ANCHOR_MARKER_PREFIX = "MBRIEF_ANCHOR";
+const CATEGORY_ANCHOR_MARKER_PREFIX = "MBRIEF_CAT_ANCHOR";
+
 const FEED_SOURCES: FeedSource[] = [
+  // Preprint hubs
   {
     name: "bioRxiv Neuroscience",
-    url: "http://connect.biorxiv.org/biorxiv_xml.php?subject=neuroscience",
+    url: "https://connect.biorxiv.org/biorxiv_xml.php?subject=neuroscience&num=50",
   },
+  {
+    name: "arXiv q-bio.NC",
+    url: "https://export.arxiv.org/api/query?search_query=cat:q-bio.NC&sortBy=submittedDate&sortOrder=descending&max_results=50",
+  },
+  {
+    name: "arXiv cs.NE",
+    url: "https://export.arxiv.org/api/query?search_query=cat:cs.NE&sortBy=submittedDate&sortOrder=descending&max_results=50",
+  },
+  {
+    name: "arXiv eess.SP",
+    url: "https://export.arxiv.org/api/query?search_query=cat:eess.SP+AND+(all:brain+OR+all:neural+OR+all:eeg+OR+all:ecog+OR+all:bci+OR+all:neuroscience)+ANDNOT+(all:6g+OR+all:beamforming+OR+all:mimo+OR+all:wireless+OR+all:ofdm)&sortBy=submittedDate&sortOrder=descending&max_results=50",
+  },
+
+  // BCI / Computational core journals
+  {
+    name: "Journal of Neural Engineering (JNE)",
+    url: "https://iopscience.iop.org/journal/rss/1741-2552",
+  },
+  {
+    name: "PLOS Computational Biology",
+    url: "https://journals.plos.org/ploscompbiol/feed/atom",
+  },
+  {
+    name: "PubMed Vision Journals (JOV OR Vision Research)",
+    url: "https://pubmed.ncbi.nlm.nih.gov/rss/search/1nySOMllQ3nTCgGvgS4mtzYiMqeRod5AxvgxheX4UZ6D2GTg8M/?limit=50&utm_campaign=pubmed-2&fc=20260222084416",
+  },
+  {
+    name: "PubMed IEEE TNSRE",
+    url: "https://pubmed.ncbi.nlm.nih.gov/rss/search/1jS5MbkSM6VHZrUQk7Pq4EaiWJttA7n3uNPDd4_XDXFBJN7gsP/?limit=50&utm_campaign=pubmed-2&fc=20260222085959",
+  },
+
+  // High-impact neuroscience journals
   {
     name: "Nature Neuroscience",
     url: "https://www.nature.com/neuro.rss",
@@ -133,6 +174,14 @@ const FEED_SOURCES: FeedSource[] = [
   {
     name: "Neuron (In Press)",
     url: "https://www.cell.com/neuron/inpress.rss",
+  },
+  {
+    name: "Journal of Neuroscience (JNeurosci)",
+    url: "https://pubmed.ncbi.nlm.nih.gov/rss/search/1PUPW_FOWnJMTnoPaQkJiAPo7laTd7VRJ7xTHY3zqCrnRsMsHv/?limit=50&utm_campaign=pubmed-2&fc=20260222094859", 
+  },
+  {
+    name: "eLife Neuroscience",
+    url: "https://elifesciences.org/rss/subject/neuroscience.xml",
   },
 ];
 
@@ -147,6 +196,27 @@ const RSS_FETCH_HEADERS: HeadersInit = {
   "Accept-Language": "en-US,en;q=0.9,zh-CN;q=0.8",
   Connection: "keep-alive",
 };
+
+const RSS_HEADER_PROFILES: Array<{ name: string; headers?: HeadersInit }> = [
+  { name: "xml-strict", headers: RSS_FETCH_HEADERS },
+  {
+    name: "xml-relaxed",
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      Accept: "*/*",
+      "Accept-Language": "en-US,en;q=0.9",
+    },
+  },
+  {
+    name: "minimal-ua",
+    headers: {
+      "User-Agent":
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    },
+  },
+  { name: "runtime-default", headers: undefined },
+];
 
 const CATEGORY_KEYWORDS: Record<Category, string[]> = {
   "脑机接口与神经信号解码 (BCI & Decoding)": [
@@ -238,6 +308,7 @@ const PRIORITY_WHITELIST = [
   "computational model",
   "network model",
   "simulation",
+  "BCI", 
 ];
 
 // Strong out-of-scope signals for this specific morning brief.
@@ -258,6 +329,71 @@ const OUT_OF_SCOPE_NEGATIVE_KEYWORDS = [
   "alzheimer",
   "amyotrophic",
   "amyloid",
+  "epilepsy",
+  "seizure",
+  "cancer",
+  "tumor",
+  "brachytherapy",
+  "dementia",
+  "schizophrenia",
+  "autism",
+  "protein design",
+  "nanopore",
+  "biosensor",
+  "peptide",
+  "astrocyte",
+  "myelination",
+  "stem cell",
+  "progenitor",
+  "radar",
+  "sar imaging",
+  "3d printing",
+  "plant disease",
+  "fault detection",
+  "clip-based",
+  "multimodal summarization",
+  "heuristic search",
+  "language-guided",
+  "program optimization",
+  "social dominance",
+  "transcranial magnetic stimulation", 
+  "tms coil", 
+];
+
+// Extra hard filter for arXiv eess.SP, which is dominated by communication papers.
+const EESS_SP_INCLUDE_KEYWORDS = [
+  "brain",
+  "neural",
+  "neuroscience",
+  "eeg",
+  "ecog",
+  "meg",
+  "bci",
+  "brain-computer",
+  "electrophysiology",
+  "spike",
+  "neuro",
+];
+
+const EESS_SP_EXCLUDE_KEYWORDS = [
+  "6g",
+  "beamforming",
+  "massive mimo",
+  "mimo",
+  "ofdm",
+  "base station",
+  "wireless",
+  "cell-free",
+  "channel estimation",
+  "reconfigurable intelligent surface",
+  "irs",
+  "mmwave",
+  "terahertz",
+  "satellite",
+  "noma",
+  "semantic communication",
+  "symbol error rate",
+  "bit error rate",
 ];
 
 const KEYWORD_CLOUD_RULES: Array<{ label: string; patterns: string[] }> = [
@@ -313,17 +449,10 @@ async function collectPapers(windowStart: Date, windowEnd: Date): Promise<PaperI
   const allItems = await Promise.all(
     FEED_SOURCES.map(async (source) => {
       try {
-        const response = await fetch(buildFeedRequestUrl(source.url), {
-          method: "GET",
-          headers: RSS_FETCH_HEADERS,
-        });
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status} ${response.statusText}`);
-        }
-        const xmlData = await response.text();
+        const xmlData = await fetchFeedXmlWithRetry(buildFeedRequestUrl(source.url), source.name);
         const parsed = parser.parse(xmlData);
         const feedItems = parseFeedItems(parsed, source);
-        const papers = feedItems.map((item) => ({
+        const rawPapers = feedItems.map((item) => ({
           title: item.title,
           link: item.link,
           source: source.name,
@@ -331,6 +460,14 @@ async function collectPapers(windowStart: Date, windowEnd: Date): Promise<PaperI
           publishedAt: item.publishedAt,
           category: categorizePaper(item.title, item.description),
         }));
+
+        const papers = rawPapers.filter((paper) => shouldKeepPaperBySource(source.name, paper));
+        const droppedBySourceFilter = rawPapers.length - papers.length;
+        if (droppedBySourceFilter > 0) {
+          console.log(
+            `[MorningBrief] Feed ${source.name}: source-filter dropped=${droppedBySourceFilter}`,
+          );
+        }
 
         const in24h = papers.filter((paper) => {
           if (!paper.publishedAt) {
@@ -381,7 +518,7 @@ async function collectPapers(windowStart: Date, windowEnd: Date): Promise<PaperI
 function parseFeedItems(parsedFeed: any, source: FeedSource): ParsedFeedItem[] {
   const rssItems = asArray(parsedFeed?.rss?.channel?.item);
   const rdfItems = asArray(parsedFeed?.["rdf:RDF"]?.item);
-  const atomEntries = asArray(parsedFeed?.feed?.entry);
+  const atomEntries = asArray(parsedFeed?.feed?.entry || parsedFeed?.entry);
   const rawItems = [...rssItems, ...rdfItems, ...atomEntries];
 
   return rawItems
@@ -498,6 +635,26 @@ function isOutOfScopeForThisBrief(paper: PaperItem): boolean {
   return false;
 }
 
+function shouldKeepPaperBySource(sourceName: string, paper: PaperItem): boolean {
+  if (!sourceName.includes("arXiv eess.SP")) {
+    return true;
+  }
+
+  const text = `${paper.title} ${paper.abstract}`.toLowerCase();
+  const includeHits = countKeywordHits(text, EESS_SP_INCLUDE_KEYWORDS);
+  const excludeHits = countKeywordHits(text, EESS_SP_EXCLUDE_KEYWORDS);
+  const coreHits = getCoreFocusHits(text);
+
+  // eess.SP requires stronger evidence of neuroscience relevance.
+  if (includeHits === 0 && coreHits === 0) {
+    return false;
+  }
+  if (excludeHits > 0 && coreHits < 2) {
+    return false;
+  }
+  return true;
+}
+
 async function buildReportWithFallback(
   papers: PaperItem[],
   reportDate: string,
@@ -531,10 +688,11 @@ interface PaperSummary {
   conclusion: string;
   score: number;
   scoreReason: string;
+  fallbackReason?: string;
 }
 
 async function summarizePapersInParallel(papers: PaperItem[], env: BriefingEnv): Promise<PaperSummary[]> {
-  const concurrency = 6;
+  const concurrency = 4;
   const workers = Array.from({ length: Math.min(concurrency, papers.length) }, async (_, workerIdx) => {
     const results: PaperSummary[] = [];
     for (let i = workerIdx; i < papers.length; i += concurrency) {
@@ -546,6 +704,21 @@ async function summarizePapersInParallel(papers: PaperItem[], env: BriefingEnv):
 
   const chunks = await Promise.all(workers);
   const all = chunks.flat();
+  const fallbackCountByReason = all.reduce<Map<string, number>>((acc, item) => {
+    if (!item.fallbackReason) {
+      return acc;
+    }
+    acc.set(item.fallbackReason, (acc.get(item.fallbackReason) || 0) + 1);
+    return acc;
+  }, new Map<string, number>());
+  const totalFallback = [...fallbackCountByReason.values()].reduce((sum, v) => sum + v, 0);
+  if (totalFallback > 0) {
+    const detail = [...fallbackCountByReason.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([reason, count]) => `${reason}:${count}`)
+      .join(", ");
+    console.warn(`[MorningBrief] LLM summarize fallback stats: total=${totalFallback}; ${detail}`);
+  }
   console.log(`[MorningBrief] LLM summarize: input=${papers.length}, output=${all.length}`);
   return all;
 }
@@ -554,8 +727,15 @@ async function summarizeSinglePaper(paper: PaperItem, env: BriefingEnv): Promise
   const fallback = buildFallbackPaperSummary(paper);
 
   const systemPrompt =
-    "你是神经科学晨报的论文精读助手。你每次只处理一篇论文，并且只能根据给定的标题、摘要、来源和链接输出。\n" +
-    "你必须返回严格 JSON（不要 markdown、不要代码块、不要额外文字），字段如下：\n" +
+    "你是神经科学晨报的严格筛选门卫与精读助手。读者是一位计算神经科学领域的研究者，核心关注：1) 脑机接口(BCI)与脑电(EEG/iEEG)解码；2) 视觉皮层的计算建模（如空间组织、方位选择性）；3) 脉冲神经网络、吸引子网络等类脑动力学模型。\n" +
+    "对于输入的论文标题和摘要，你必须先判断它是否符合读者的核心关注。\n" +
+    "【一票否决规则】：如果论文属于以下任何一类，请直接在所有中文字段返回“REJECT”，并将 score 设为 0：\n" +
+    "1. 纯临床疾病诊断/治疗（如癫痫数据集、宫颈癌、痴呆预测）。\n" +
+    "2. 纯分子/细胞生物学机制（如蛋白质设计、胶质细胞吞噬、受体分子结构）。\n" +
+    "3. 纯计算机科学/工程应用，完全脱离生物脑背景（如用于雷达的神经网络、3D打印检测、纯大语言模型提示词优化、网页摘要）。\n" +
+    "4. 偏向脊髓损伤恢复、社会等级演化博弈等边缘主题。\n" +
+    "\n" +
+    "如果文章合格，请返回严格 JSON（不要 markdown、不要代码块、不要额外文字），字段如下：\n" +
     "{\n" +
     '  "translatedTitleZh": "中文标题",\n' +
     '  "titleEn": "英文原题",\n' +
@@ -579,7 +759,7 @@ async function summarizeSinglePaper(paper: PaperItem, env: BriefingEnv): Promise
     "2) 专业词汇优先直译：attractor network -> 吸引子网络，decoding -> 解码，orientation selectivity -> 方位选择性。\n" +
     "语言规则：所有字段内容必须中文（titleEn保留英文原题）。";
 
-  const response = await fetch("https://api.moonshot.cn/v1/chat/completions", {
+  const requestInit: RequestInit = {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -602,38 +782,186 @@ async function summarizeSinglePaper(paper: PaperItem, env: BriefingEnv): Promise
         },
       ],
     }),
-  });
-
-  if (!response.ok) {
-    const errBody = await response.text();
-    console.error(`[MorningBrief] Single-paper LLM failed for ${paper.link}: ${response.status} ${errBody}`);
-    return fallback;
-  }
-
-  const data: any = await response.json();
-  const content = data?.choices?.[0]?.message?.content;
-  if (!content || typeof content !== "string") {
-    return fallback;
-  }
-
-  const parsed = parseSummaryJson(content);
-  if (!parsed) {
-    return fallback;
-  }
-
-  const normalizedCategory = normalizeCategory(parsed.category);
-  const normalizedScore = normalizeLLMScore(paper, clampScore(parsed.score), normalizedCategory);
-  return {
-    paper,
-    category: normalizedCategory,
-    translatedTitleZh: parsed.translatedTitleZh || fallback.translatedTitleZh,
-    titleEn: parsed.titleEn || paper.title,
-    problem: parsed.problem || fallback.problem,
-    method: parsed.method || fallback.method,
-    conclusion: parsed.conclusion || fallback.conclusion,
-    score: normalizedScore,
-    scoreReason: parsed.scoreReason || fallback.scoreReason,
   };
+
+  for (let attempt = 0; attempt < LLM_SUMMARY_PARSE_RETRIES; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetchWithRetry("https://api.moonshot.cn/v1/chat/completions", requestInit);
+    } catch (error) {
+      if (attempt === LLM_SUMMARY_PARSE_RETRIES - 1) {
+        console.error(`[MorningBrief] Single-paper LLM request errored after retries for ${paper.link}:`, error);
+        return withFallbackReason(fallback, "request_exception");
+      }
+      const waitMs = getJitteredBackoffMs(attempt);
+      console.warn(
+        `[MorningBrief] Single-paper request exception, retry summarize in ${waitMs}ms... (${attempt + 1}/${LLM_SUMMARY_PARSE_RETRIES})`,
+      );
+      await sleep(waitMs);
+      continue;
+    }
+
+    if (!response.ok) {
+      const errBody = await response.text();
+      if (attempt === LLM_SUMMARY_PARSE_RETRIES - 1) {
+        console.error(`[MorningBrief] Single-paper LLM failed for ${paper.link}: ${response.status} ${errBody}`);
+        return withFallbackReason(fallback, `http_${response.status}`);
+      }
+      const waitMs = getRetryDelayMs(response, attempt);
+      console.warn(
+        `[MorningBrief] Single-paper non-OK response (status=${response.status}), retry summarize in ${waitMs}ms... (${attempt + 1}/${LLM_SUMMARY_PARSE_RETRIES})`,
+      );
+      await sleep(waitMs);
+      continue;
+    }
+
+    let data: any;
+    try {
+      data = await response.json();
+    } catch (error) {
+      if (attempt === LLM_SUMMARY_PARSE_RETRIES - 1) {
+        console.error(`[MorningBrief] Single-paper JSON decode failed for ${paper.link}:`, error);
+        return withFallbackReason(fallback, "json_decode_failed");
+      }
+      const waitMs = getJitteredBackoffMs(attempt);
+      console.warn(
+        `[MorningBrief] Single-paper JSON decode failed, retry summarize in ${waitMs}ms... (${attempt + 1}/${LLM_SUMMARY_PARSE_RETRIES})`,
+      );
+      await sleep(waitMs);
+      continue;
+    }
+
+    const content = data?.choices?.[0]?.message?.content;
+    if (!content || typeof content !== "string") {
+      if (attempt === LLM_SUMMARY_PARSE_RETRIES - 1) {
+        console.error(`[MorningBrief] Single-paper empty LLM content for ${paper.link}`);
+        return withFallbackReason(fallback, "empty_content");
+      }
+      const waitMs = getJitteredBackoffMs(attempt);
+      console.warn(
+        `[MorningBrief] Single-paper empty content, retry summarize in ${waitMs}ms... (${attempt + 1}/${LLM_SUMMARY_PARSE_RETRIES})`,
+      );
+      await sleep(waitMs);
+      continue;
+    }
+
+    // Accept plain-text veto as valid output and skip JSON parsing retries.
+    if (isPlainReject(content)) {
+      console.log(`[MorningBrief] Single-paper plain REJECT accepted for ${paper.link}`);
+      return {
+        ...fallback,
+        score: 0,
+        problem: "无关论文，已被屏蔽",
+      };
+    }
+
+    const parsed = parseSummaryJson(content);
+    if (!parsed) {
+      if (attempt === LLM_SUMMARY_PARSE_RETRIES - 1) {
+        const preview = content.slice(0, 180).replace(/\s+/g, " ");
+        console.error(`[MorningBrief] Single-paper JSON schema parse failed for ${paper.link}; preview=${preview}`);
+        return withFallbackReason(fallback, "json_schema_parse_failed");
+      }
+      const waitMs = getJitteredBackoffMs(attempt);
+      console.warn(
+        `[MorningBrief] Single-paper JSON schema parse failed, retry summarize in ${waitMs}ms... (${attempt + 1}/${LLM_SUMMARY_PARSE_RETRIES})`,
+      );
+      await sleep(waitMs);
+      continue;
+    }
+
+    // Hard reject branch: ensure out-of-scope papers never enter visible report section.
+    const zhFields = [parsed.translatedTitleZh, parsed.problem, parsed.method, parsed.conclusion, parsed.scoreReason];
+    const hasRejectSignal = zhFields.some(
+      (value) => typeof value === "string" && value.trim().toUpperCase() === "REJECT",
+    );
+    if (hasRejectSignal || Number(parsed.score) === 0) {
+      return {
+        ...fallback,
+        score: 0,
+        problem: "无关论文，已被屏蔽",
+      };
+    }
+
+    const normalizedCategory = normalizeCategory(parsed.category);
+    const normalizedScore = normalizeLLMScore(paper, clampScore(parsed.score), normalizedCategory);
+    return {
+      paper,
+      category: normalizedCategory,
+      translatedTitleZh: parsed.translatedTitleZh || fallback.translatedTitleZh,
+      titleEn: parsed.titleEn || paper.title,
+      problem: parsed.problem || fallback.problem,
+      method: parsed.method || fallback.method,
+      conclusion: parsed.conclusion || fallback.conclusion,
+      score: normalizedScore,
+      scoreReason: parsed.scoreReason || fallback.scoreReason,
+    };
+  }
+
+  return withFallbackReason(fallback, "unknown_summary_failure");
+}
+
+/**
+ * Retry LLM request on transient overload statuses with exponential backoff.
+ * This avoids dropping papers immediately when upstream model service is busy.
+ */
+async function fetchWithRetry(url: string, options: RequestInit, maxRetries = LLM_MAX_RETRIES): Promise<Response> {
+  for (let attempt = 0; attempt < maxRetries; attempt += 1) {
+    try {
+      const response = await fetch(url, options);
+      if (!LLM_RETRYABLE_STATUS.has(response.status) || attempt === maxRetries - 1) {
+        return response;
+      }
+
+      const waitMs = getRetryDelayMs(response, attempt);
+      console.warn(
+        `[MorningBrief] LLM overloaded (status=${response.status}), retry in ${waitMs}ms... (${attempt + 1}/${maxRetries})`,
+      );
+      await sleep(waitMs);
+    } catch (error) {
+      if (attempt === maxRetries - 1) {
+        throw error;
+      }
+      const waitMs = 1.5 ** (attempt + 1) * 1000;
+      console.warn(
+        `[MorningBrief] LLM request failed, retry in ${waitMs}ms... (${attempt + 1}/${maxRetries})`,
+      );
+      await sleep(waitMs);
+    }
+  }
+
+  throw new Error("LLM retry exhausted without response");
+}
+
+function getRetryDelayMs(response: Response, attempt: number): number {
+  const retryAfter = response.headers.get("Retry-After");
+  if (retryAfter) {
+    const asSeconds = Number(retryAfter);
+    if (Number.isFinite(asSeconds) && asSeconds >= 0) {
+      return getJitteredDelay(Math.round(asSeconds * 1000));
+    }
+
+    const asDateTs = Date.parse(retryAfter);
+    if (Number.isFinite(asDateTs)) {
+      return getJitteredDelay(asDateTs - Date.now());
+    }
+  }
+  // 2s, 4s, 8s...
+  return getJitteredBackoffMs(attempt);
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getJitteredBackoffMs(attempt: number): number {
+  return getJitteredDelay(2 ** (attempt + 1) * 1000);
+}
+
+function getJitteredDelay(baseMs: number): number {
+  // Add bounded jitter to reduce synchronized retry bursts.
+  const factor = 0.8 + Math.random() * 0.4; // 0.8x ~ 1.2x
+  return Math.max(1000, Math.round(baseMs * factor));
 }
 
 function parseSummaryJson(content: string): Partial<PaperSummary> | null {
@@ -655,6 +983,15 @@ function parseSummaryJson(content: string): Partial<PaperSummary> | null {
   return tryParseJsonObject(cleaned.slice(start, end + 1));
 }
 
+function isPlainReject(content: string): boolean {
+  const cleaned = content
+    .replace(/```json/gi, "")
+    .replace(/```/g, "")
+    .trim()
+    .toUpperCase();
+  return cleaned === "REJECT";
+}
+
 function tryParseJsonObject(jsonText: string): Partial<PaperSummary> | null {
   try {
     const parsed = JSON.parse(jsonText);
@@ -673,13 +1010,20 @@ function buildFallbackPaperSummary(paper: PaperItem): PaperSummary {
   return {
     paper,
     category: paper.category,
-    translatedTitleZh: `待翻译：${paper.title}`,
+    translatedTitleZh: `（自动降级）${paper.title}`,
     titleEn: paper.title,
     problem: tag.problem,
     method: tag.method,
     conclusion: tag.conclusion,
     score,
     scoreReason: buildFallbackScoreReason(paper, score),
+  };
+}
+
+function withFallbackReason(fallback: PaperSummary, reason: string): PaperSummary {
+  return {
+    ...fallback,
+    fallbackReason: reason,
   };
 }
 
@@ -751,10 +1095,19 @@ function buildLLMComposedReport(summaries: PaperSummary[], reportDate: string, k
     "视觉与感知机制 (Vision & Perception)",
     "其他神经科学研究 (Others)",
   ];
+  const categoryAnchorByName = new Map<Category, string>(
+    orderedCategories.map((category, idx) => [category, `category-${idx + 1}`]),
+  );
+  const categoryQuickNav = orderedCategories
+    .map((category) => `[${category}](#${categoryAnchorByName.get(category)})`)
+    .join(" | ");
 
   const sections: string[] = [];
+  const detailAnchorByLink = new Map<string, string>();
+  let detailAnchorSeq = 1;
   for (const category of orderedCategories) {
     const items = grouped[category];
+    sections.push(buildCategoryAnchorMarker(categoryAnchorByName.get(category) || "category-fallback"));
     sections.push(`### ${category}`);
     if (!items || items.length === 0) {
       sections.push("* 暂无符合条件的新论文。");
@@ -763,9 +1116,13 @@ function buildLLMComposedReport(summaries: PaperSummary[], reportDate: string, k
     }
 
     items.forEach((item, index) => {
+      const anchorId = `detail-${detailAnchorSeq}`;
+      detailAnchorSeq += 1;
+      detailAnchorByLink.set(item.paper.link, anchorId);
       const title = `${item.translatedTitleZh}（${item.titleEn}）`;
       sections.push(
-        `${index + 1}. **[${title}](${item.paper.link})** - *${item.paper.source}*\n` +
+        `${buildDetailAnchorMarker(anchorId)}\n` +
+          `${index + 1}. **[${title}](${item.paper.link})** - *${item.paper.source}*\n` +
           "   * 总结摘要:\n" +
           `     * 🎯 问题: ${item.problem}\n` +
           `     * 🛠️ 方法: ${item.method}\n` +
@@ -781,7 +1138,12 @@ function buildLLMComposedReport(summaries: PaperSummary[], reportDate: string, k
     topPicks.length > 0
       ? topPicks.slice(0, 10).map((item, idx) => {
           const title = `${item.translatedTitleZh}（${item.titleEn}）`;
-          return `${idx + 1}. **[${title}](${item.paper.link})**（推荐阅读指数：${item.score}）`;
+          const anchorId = detailAnchorByLink.get(item.paper.link);
+          const detailLink = anchorId ? `#${anchorId}` : item.paper.link;
+          return (
+            `${idx + 1}. **[${title}](${detailLink})**` +
+            `（推荐阅读指数：${item.score}，[*原文链接*](${item.paper.link})）`
+          );
         })
       : ["* 今日暂无9分以上主推论文。"];
 
@@ -797,6 +1159,7 @@ function buildLLMComposedReport(summaries: PaperSummary[], reportDate: string, k
     ...topPickLines,
     "",
     "## 🗂️ 分类速览",
+    `* 快速跳转：${categoryQuickNav}`,
     "",
     ...sections,
   ].join("\n");
@@ -824,15 +1187,24 @@ function buildRuleBasedReport(papers: PaperItem[], reportDate: string): string {
   const topPicks = pickTopPapers(visiblePapers);
 
   const sections: string[] = [];
+  const detailAnchorByLink = new Map<string, string>();
+  let detailAnchorSeq = 1;
   const orderedCategories: Category[] = [
     "脑机接口与神经信号解码 (BCI & Decoding)",
     "计算神经科学与网络建模 (Computational Modeling)",
     "视觉与感知机制 (Vision & Perception)",
     "其他神经科学研究 (Others)",
   ];
+  const categoryAnchorByName = new Map<Category, string>(
+    orderedCategories.map((category, idx) => [category, `category-${idx + 1}`]),
+  );
+  const categoryQuickNav = orderedCategories
+    .map((category) => `[${category}](#${categoryAnchorByName.get(category)})`)
+    .join(" | ");
 
   for (const category of orderedCategories) {
     const items = grouped[category] ?? [];
+    sections.push(buildCategoryAnchorMarker(categoryAnchorByName.get(category) || "category-fallback"));
     sections.push(`### ${category}`);
     if (items.length === 0) {
       sections.push("* 暂无符合条件的新论文。");
@@ -841,11 +1213,15 @@ function buildRuleBasedReport(papers: PaperItem[], reportDate: string): string {
     }
 
     items.forEach((paper, index) => {
+      const anchorId = `detail-${detailAnchorSeq}`;
+      detailAnchorSeq += 1;
+      detailAnchorByLink.set(paper.link, anchorId);
       const summary = buildTaggedSummary(paper.abstract);
       const score = estimateReadScore(paper);
       const reason = buildFallbackScoreReason(paper, score);
       sections.push(
-        `${index + 1}. **[${paper.title}](${paper.link})** - *${paper.source}*\n` +
+        `${buildDetailAnchorMarker(anchorId)}\n` +
+          `${index + 1}. **[${paper.title}](${paper.link})** - *${paper.source}*\n` +
           `   * 总结摘要:\n` +
           `     * 🎯 问题: ${summary.problem}\n` +
           `     * 🛠️ 方法: ${summary.method}\n` +
@@ -866,9 +1242,10 @@ function buildRuleBasedReport(papers: PaperItem[], reportDate: string): string {
     `* **关键词云**：${keywordCloud.join("、") || "暂无高频关键词"}`,
     "",
     "## 🏆 今日主推",
-    ...buildTopPicksLines(topPicks),
+    ...buildTopPicksLines(topPicks, detailAnchorByLink),
     "",
     "## 🗂️ 分类速览",
+    `* 快速跳转：${categoryQuickNav}`,
     "",
     ...sections,
   ].join("\n");
@@ -904,9 +1281,12 @@ function buildEmptyReport(reportDate: string): string {
 async function sendReportEmail(reportMarkdown: string, reportDate: string, env: BriefingEnv): Promise<void> {
   const fromAddress = env.RESEND_FROM_EMAIL || "AI Assistant <onboarding@resend.dev>";
   const renderedHtml = markdownRenderer.render(reportMarkdown);
+  const renderedHtmlWithAnchors = injectDetailAnchors(renderedHtml);
+  const renderedHtmlWithInPageLinks = enforceInPageAnchorLinks(renderedHtmlWithAnchors);
+  const textWithoutAnchorMarkers = stripDetailAnchorMarkers(reportMarkdown);
   const html = `
 <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; line-height: 1.75; color: #111;">
-  ${renderedHtml}
+  ${renderedHtmlWithInPageLinks}
 </div>`;
 
   const response = await fetch("https://api.resend.com/emails", {
@@ -920,7 +1300,7 @@ async function sendReportEmail(reportMarkdown: string, reportDate: string, env: 
       to: env.TARGET_EMAIL,
       subject: `🧠 神经科学晨报 ${reportDate}`,
       html,
-      text: reportMarkdown,
+      text: textWithoutAnchorMarkers,
     }),
   });
 
@@ -1084,15 +1464,22 @@ function pickTopPapers(papers: PaperItem[]): Array<{ paper: PaperItem; score: nu
     .sort((a, b) => b.score - a.score);
 }
 
-function buildTopPicksLines(topPicks: Array<{ paper: PaperItem; score: number }>): string[] {
+function buildTopPicksLines(
+  topPicks: Array<{ paper: PaperItem; score: number }>,
+  detailAnchorByLink: Map<string, string>,
+): string[] {
   if (topPicks.length === 0) {
     return ["* 今日暂无9分以上主推论文。"];
   }
 
-  return topPicks.slice(0, 8).map(
-    (item, idx) =>
-      `${idx + 1}. **[${item.paper.title}](${item.paper.link})** - *${item.paper.source}*（推荐阅读指数：${item.score}）`,
-  );
+  return topPicks.slice(0, 8).map((item, idx) => {
+    const anchorId = detailAnchorByLink.get(item.paper.link);
+    const detailLink = anchorId ? `#${anchorId}` : item.paper.link;
+    return (
+      `${idx + 1}. **[${item.paper.title}](${detailLink})** - *${item.paper.source}*` +
+      `（推荐阅读指数：${item.score}，[*原文链接*](${item.paper.link})）`
+    );
+  });
 }
 
 function truncateText(input: string, maxLen: number): string {
@@ -1107,6 +1494,43 @@ function buildFeedRequestUrl(baseUrl: string): string {
   } catch {
     return baseUrl;
   }
+}
+
+async function fetchFeedXmlWithRetry(url: string, sourceName: string): Promise<string> {
+  let lastError: string | null = null;
+
+  for (const profile of RSS_HEADER_PROFILES) {
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        headers: profile.headers,
+      });
+      if (!response.ok) {
+        lastError = `${profile.name}: HTTP ${response.status} ${response.statusText}`;
+        continue;
+      }
+
+      const xmlData = await response.text();
+      if (!xmlData || !xmlData.trim()) {
+        lastError = `${profile.name}: empty response body`;
+        continue;
+      }
+
+      if (!/<(rss|feed|rdf:RDF)/i.test(xmlData)) {
+        lastError = `${profile.name}: non-feed response`;
+        continue;
+      }
+
+      if (profile.name !== "xml-strict") {
+        console.log(`[MorningBrief] Feed ${sourceName}: fallback profile succeeded -> ${profile.name}`);
+      }
+      return xmlData;
+    } catch (error) {
+      lastError = `${profile.name}: ${error instanceof Error ? error.message : String(error)}`;
+    }
+  }
+
+  throw new Error(lastError || "all fetch profiles failed");
 }
 
 function getCoreFocusHits(text: string): number {
@@ -1166,6 +1590,35 @@ function normalizeWhitespace(input: string): string {
   return input.replace(/\s+/g, " ").trim();
 }
 
+function buildDetailAnchorMarker(anchorId: string): string {
+  return `${DETAIL_ANCHOR_MARKER_PREFIX}(${anchorId})`;
+}
+
+function buildCategoryAnchorMarker(anchorId: string): string {
+  return `${CATEGORY_ANCHOR_MARKER_PREFIX}(${anchorId})`;
+}
+
+function injectDetailAnchors(renderedHtml: string): string {
+  return renderedHtml.replace(
+    /(?:MBRIEF_ANCHOR|MBRIEF_CAT_ANCHOR)\(([a-zA-Z0-9-]+)\)/g,
+    (_match, anchorId: string) => `<span id="${anchorId}"></span>`,
+  );
+}
+
+function stripDetailAnchorMarkers(reportMarkdown: string): string {
+  return reportMarkdown
+    .replace(/^(?:MBRIEF_ANCHOR|MBRIEF_CAT_ANCHOR)\([a-zA-Z0-9-]+\)\s*$/gm, "")
+    .replace(/\n{3,}/g, "\n\n");
+}
+
+function enforceInPageAnchorLinks(renderedHtml: string): string {
+  // Force hash-links to stay in current document context for mailbox clients.
+  return renderedHtml.replace(
+    /<a\s+href="#([a-zA-Z0-9-]+)"[^>]*>/g,
+    (_match, anchorId: string) => `<a href="#${anchorId}" target="_self">`,
+  );
+}
+
 
 ```
 
@@ -1219,6 +1672,12 @@ crons = ["0 0 * * *"]
    # kimi-k2-0905-preview
    
    npx wrangler secret put RESEND_FROM_EMAIL
+   
+   npm run deploy
+   # 重新部署
+   
+   npm run run:brief
+   # 使用这个命令立刻本地运行查看结果
    ```
 
 ### 完成！
@@ -1232,8 +1691,26 @@ crons = ["0 0 * * *"]
 验证RSS：
 
 ```powershell
-Remove-Item alias:curl
-
-curl -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -I http://connect.biorxiv.org/biorxiv_xml.php?subject=neuroscience
+curl.exe -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" -I "http://connect.biorxiv.org/biorxiv_xml.php?subject=neuroscience"
 ```
 
+---
+
+《Journal of Vision》和《Vision Research》都被 PubMed 完整收录。PubMed 的接口不仅极其稳定、永远在线，而且返回的 XML 结构非常干净规范，解析起来比出版商乱七八糟的网页结构舒服得多。
+
+### 获取这两个期刊稳定 RSS 的步骤：
+
+1. **访问 PubMed 官网** (pubmed.ncbi.nlm.nih.gov)
+2. **输入精准的期刊检索式**：
+   * 检索 JOV：`"Journal of Vision"[Journal]`
+   * 检索 Vision Research：`"Vision Research"[Journal]`
+3. **生成专属链接**：在搜索框正下方，点击 **"Create RSS"** 按钮。
+4. **自定义设置**：你可以将 "Number of items displayed" 设置为 15 或 50，然后点击 "Create RSS" 获取专属的 XML 链接，直接填入你的代码配置中即可。
+
+### 💡 一个进阶技巧
+
+使用 PubMed 作为 RSS 生成器最大的优势在于它支持复杂的布尔逻辑（Boolean logic）。你不仅可以订阅整个期刊，还可以直接在源头加上极其垂直的关键词过滤。
+
+例如，你可以构造这样一个高级检索式来生成聚合 RSS： `("Journal of Vision"[Journal] OR "Vision Research"[Journal]) AND (orientation-selective cells OR mouse visual cortex)`
+
+这样生成的专属 RSS 源，只要有关于小鼠视觉皮层或方向选择性细胞等核心机制的新文章发表，你的晨报系统就能第一时间精准捕获，完全不需要耗费大模型的 Token 去做海量文章的二次筛选。
