@@ -1,6 +1,6 @@
 ---
 title: RSS自动推送论文配置（无需服务器）
-publishDate: 2026-01-31 19:39:00
+publishDate: 2026-02-22 21:02:00
 description: '信息流减法'
 tags:
   - RSS
