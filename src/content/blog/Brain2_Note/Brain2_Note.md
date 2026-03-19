@@ -282,4 +282,62 @@ By default, subexpressions are re-evaluated whenever they are used. Sometimes it
 * 如果你希望在**一个时间步内 ($dt$)** 只计算一次该值，并在随后的所有计算中复用该值，就需要加上这个标志。
 * **重要场景**：当子表达式包含随机函数（如 `rand()`）时，**必须**使用这个标志。否则，如果你用 `StateMonitor` 记录它，记录下来的值会和神经元方程里实际使用的值不一样（因为每次调用都生成了新的随机数）。
 
-### 8. [Storing state variables](https://brian2.readthedocs.io/en/stable/user/models.html#id14)
+```python
+# 默认情况下，每次用到 'current_sum'，Brian2 都会重新计算一遍
+# 对于确定性表达式，加不加标志对结果没有影响。
+eqs = '''
+dv/dt = (I_leak + current_sum) / C : volt
+current_sum = I_ext + I_syn : amp  # 子表达式
+'''
+
+eqs = '''
+dv/dt = (-(v - v_rest) + xi_noise) / tau : volt
+xi_noise = 0.1 * rand() : 1 (constant over dt) # 强制每步只计算一次
+'''
+```
+
+**结果：** 在每一个 $dt$ 开始时，Brian2 生成一个随机数存入 `xi_noise`。在该步内的所有后续计算（包括 `StateMonitor` 的记录）都会使用这**同一个**数值。
+
+### 9. [Storing state variables](https://brian2.readthedocs.io/en/stable/user/models.html#id14)
+
+Sometimes it can be convenient to access multiple state variables at once, e.g. to set initial values from a dictionary of values or to store all the values of a group on disk. This can be done with the [`get_states()`](https://brian2.readthedocs.io/en/stable/reference/brian2.groups.group.VariableOwner.html#brian2.groups.group.VariableOwner.get_states) and [`set_states()`](https://brian2.readthedocs.io/en/stable/reference/brian2.groups.group.VariableOwner.html#brian2.groups.group.VariableOwner.set_states) methods
+
+```python
+>>> group = NeuronGroup(5, '''dv/dt = -v/tau : 1
+...                          tau : second''', name='neurons')
+>>> initial_values = {'v': [0, 1, 2, 3, 4],
+...                   'tau': [10, 20, 10, 20, 10]*ms}
+>>> group.set_states(initial_values)
+>>> group.v[:]
+array([ 0.,  1.,  2.,  3.,  4.])
+>>> group.tau[:]
+array([ 10.,  20.,  10.,  20.,  10.]) * msecond
+>>> states = group.get_states()
+>>> states['v']
+array([ 0.,  1.,  2.,  3.,  4.])
+
+>>> df = group.get_states(units=False, format='pandas')
+>>> df
+   N      dt  i    t   tau    v
+0  5  0.0001  0  0.0  0.01  0.0
+1  5  0.0001  1  0.0  0.02  1.0
+2  5  0.0001  2  0.0  0.01  2.0
+3  5  0.0001  3  0.0  0.02  3.0
+4  5  0.0001  4  0.0  0.01  4.0
+>>> df['tau']
+0    0.01
+1    0.02
+2    0.01
+3    0.02
+4    0.01
+Name: tau, dtype: float64
+>>> df['tau'] *= 2
+>>> group.set_states(df[['tau']], units=False, format='pandas')
+>>> group.tau
+<neurons.tau: array([ 20.,  40.,  20.,  40.,  20.]) * msecond>
+```
+
+### 10. [Linked variables](https://brian2.readthedocs.io/en/stable/user/models.html#id15)
+
+### 11. [Time scaling of noise](https://brian2.readthedocs.io/en/stable/user/models.html#id16)
+
